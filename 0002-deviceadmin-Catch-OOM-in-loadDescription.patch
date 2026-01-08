@@ -1,0 +1,23 @@
+diff --git a/core/java/android/app/admin/DeviceAdminInfo.java b/core/java/android/app/admin/DeviceAdminInfo.java
+index 7b46db16f80a..54847a0d564e 100644
+--- a/core/java/android/app/admin/DeviceAdminInfo.java
++++ b/core/java/android/app/admin/DeviceAdminInfo.java
+@@ -471,12 +471,16 @@ public final class DeviceAdminInfo implements Parcelable {
+      * @param pm Supply a PackageManager used to load the device admin's
+      * resources.
+      */
+     public CharSequence loadDescription(PackageManager pm) throws NotFoundException {
+         if (mActivityInfo.descriptionRes != 0) {
+-            return pm.getText(mActivityInfo.packageName,
+-                    mActivityInfo.descriptionRes, mActivityInfo.applicationInfo);
++            try {
++                return pm.getText(mActivityInfo.packageName,
++                        mActivityInfo.descriptionRes, mActivityInfo.applicationInfo);
++            } catch (OutOfMemoryError e) {
++                throw new NotFoundException();
++            }
+         }
+         throw new NotFoundException();
+     }
+ 
+     /**

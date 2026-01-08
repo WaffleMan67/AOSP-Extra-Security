@@ -1,0 +1,165 @@
+diff --git a/core/java/android/content/pm/IPackageManager.aidl b/core/java/android/content/pm/IPackageManager.aidl
+index 18838b9ec667..ce44428fa7e3 100644
+--- a/core/java/android/content/pm/IPackageManager.aidl
++++ b/core/java/android/content/pm/IPackageManager.aidl
+@@ -497,13 +497,16 @@ interface IPackageManager {
+     /**
+      * Clear the user data directory of an application.
+      * @param packageName The package name of the application whose cache
+      * files need to be deleted
+      * @param observer a callback used to notify when the operation is completed.
++     * @param resetPermissions Whether to reset runtime permissions. Should be false
++     *        when an app is clearing its own data to prevent permission state manipulation.
+      */
+     @EnforcePermission("CLEAR_APP_USER_DATA")
+-    void clearApplicationUserData(in String packageName, IPackageDataObserver observer, int userId);
++    void clearApplicationUserData(in String packageName, IPackageDataObserver observer, int userId,
++            boolean resetPermissions);
+ 
+     /**
+      * Clear the profile data of an application.
+      * @param packageName The package name of the application whose profile data
+      * need to be deleted
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index cdd7c1fecfc8..483ef4efa7ed 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -3556,16 +3556,28 @@ public class ActivityManagerService extends IActivityManager.Stub
+ 
+     @Override
+     public boolean clearApplicationUserData(final String packageName, boolean keepState,
+             final IPackageDataObserver observer, @CanBeCURRENT @UserIdInt int userId) {
+         return clearApplicationUserData(packageName, keepState, /*isRestore=*/ false, observer,
+-                userId);
++                userId, /*resetPermissions=*/ true);
++    }
++
++    /**
++     * Clear application user data without resetting runtime permissions.
++     * Used when an app is clearing its own data to prevent permission state manipulation.
++     * @hide
++     */
++    public boolean clearApplicationUserDataWithoutPermissionReset(final String packageName,
++            boolean keepState, final IPackageDataObserver observer,
++            @CanBeCURRENT @UserIdInt int userId) {
++        return clearApplicationUserData(packageName, keepState, /*isRestore=*/ false, observer,
++                userId, /*resetPermissions=*/ false);
+     }
+ 
+     private boolean clearApplicationUserData(final String packageName, boolean keepState,
+             boolean isRestore, final IPackageDataObserver observer,
+-            @CanBeCURRENT @UserIdInt int userId) {
++            @CanBeCURRENT @UserIdInt int userId, boolean resetPermissions) {
+         enforceNotIsolatedCaller("clearApplicationUserData");
+         int uid = Binder.getCallingUid();
+         int pid = Binder.getCallingPid();
+         EventLog.writeEvent(EventLogTags.AM_CLEAR_APP_DATA_CALLER, pid, uid, packageName);
+         final int resolvedUserId = mUserController.handleIncomingUser(pid, uid, userId, false,
+@@ -3597,11 +3609,17 @@ public class ActivityManagerService extends IActivityManager.Stub
+                     applicationInfo = pm.getApplicationInfo(packageName,
+                             MATCH_UNINSTALLED_PACKAGES, resolvedUserId);
+                 } catch (RemoteException e) {
+                     /* ignore */
+                 }
+-                permitted = (applicationInfo != null && applicationInfo.uid == uid) // own uid data
++                // Security fix: When an app clears its own data (self-clear), it should
++                // not be able to reset permissions. This prevents malicious apps from
++                // using self-clear to restore revoked permissions.
++                // Allow self-clear only when NOT resetting permissions, OR if caller has
++                // CLEAR_APP_USER_DATA permission.
++                final boolean isSelfClear = applicationInfo != null && applicationInfo.uid == uid;
++                permitted = (isSelfClear && !resetPermissions)
+                         || (checkComponentPermission(permission.CLEAR_APP_USER_DATA,
+                                 pid, uid, -1, true) == PackageManager.PERMISSION_GRANTED);
+             }
+ 
+             if (!permitted) {
+@@ -3664,11 +3682,12 @@ public class ActivityManagerService extends IActivityManager.Stub
+                 }
+             };
+ 
+             try {
+                 // Clear application user data
+-                pm.clearApplicationUserData(packageName, localObserver, resolvedUserId);
++                pm.clearApplicationUserData(packageName, localObserver, resolvedUserId,
++                        resetPermissions);
+ 
+                 if (appInfo != null) {
+                     // Restore already established notification state and permission grants,
+                     // so it told us to keep those intact -- it's about to emplace app data
+                     // that is appropriate for those bits of system state.
+@@ -18378,11 +18397,11 @@ public class ActivityManagerService extends IActivityManager.Stub
+         @Override
+         public boolean clearApplicationUserData(final String packageName, boolean keepState,
+                 boolean isRestore, final IPackageDataObserver observer,
+                 @CanBeCURRENT @UserIdInt int userId) {
+             return ActivityManagerService.this.clearApplicationUserData(packageName, keepState,
+-                    isRestore, observer, userId);
++                    isRestore, observer, userId, /*resetPermissions=*/ true);
+         }
+ 
+         @Override
+         public boolean shouldDelayHomeLaunch(int userId) {
+             if (!isHomeLaunchDelayable()) return false;
+diff --git a/services/core/java/com/android/server/pm/PackageManagerService.java b/services/core/java/com/android/server/pm/PackageManagerService.java
+index b0797e2a254d..d3b57632df02 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerService.java
++++ b/services/core/java/com/android/server/pm/PackageManagerService.java
+@@ -3487,11 +3487,11 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+         }
+         return mDevicePolicyManager;
+     }
+ 
+     private boolean clearApplicationUserDataLIF(@NonNull Computer snapshot, String packageName,
+-            int userId) {
++            int userId, boolean resetPermissions) {
+         if (packageName == null) {
+             Slog.w(TAG, "Attempt to delete null packageName.");
+             return false;
+         }
+ 
+@@ -3499,11 +3499,16 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+         AndroidPackage pkg = snapshot.getPackage(packageName);
+         if (pkg == null) {
+             Slog.w(TAG, "Package named '" + packageName + "' doesn't exist.");
+             return false;
+         }
+-        mPermissionManager.resetRuntimePermissions(pkg, userId);
++        // Security fix: Only reset permissions if explicitly requested.
++        // When an app clears its own data, permissions should NOT be reset
++        // to prevent malicious apps from restoring revoked permissions.
++        if (resetPermissions) {
++            mPermissionManager.resetRuntimePermissions(pkg, userId);
++        }
+ 
+         mAppDataHelper.clearAppDataLIF(pkg, userId,
+                 FLAG_STORAGE_DE | FLAG_STORAGE_CE | FLAG_STORAGE_EXTERNAL);
+ 
+         final int appId = UserHandle.getAppId(pkg.getUid());
+@@ -4879,11 +4884,12 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+         }
+ 
+         @android.annotation.EnforcePermission(android.Manifest.permission.CLEAR_APP_USER_DATA)
+         @Override
+         public void clearApplicationUserData(final String packageName,
+-                final IPackageDataObserver observer, final int userId) {
++                final IPackageDataObserver observer, final int userId,
++                final boolean resetPermissions) {
+             clearApplicationUserData_enforcePermission();
+ 
+             final int callingUid = Binder.getCallingUid();
+             final Computer snapshot = snapshotComputer();
+             snapshot.enforceCrossUserPermission(callingUid, userId, true /* requireFullPermission */,
+@@ -4923,11 +4929,11 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+                             "clearApplicationUserData",
+                             ApplicationExitInfo.REASON_USER_REQUESTED, null /* request */,
+                             /* waitAppKilled= */ true)) {
+                         try (PackageManagerTracedLock installLock = mInstallLock.acquireLock()) {
+                             succeeded = clearApplicationUserDataLIF(snapshotComputer(), packageName,
+-                                    userId);
++                                    userId, resetPermissions);
+                         }
+                         mInstantAppRegistry.deleteInstantApplicationMetadata(packageName, userId);
+                         synchronized (mLock) {
+                             if (succeeded) {
+                                 resetComponentEnabledSettingsIfNeededLPw(packageName, userId,

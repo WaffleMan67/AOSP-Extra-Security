@@ -1,0 +1,253 @@
+diff --git a/services/accessibility/java/com/android/server/accessibility/AccessibilityManagerService.java b/services/accessibility/java/com/android/server/accessibility/AccessibilityManagerService.java
+index c9680b034010..ce465eb906ad 100644
+--- a/services/accessibility/java/com/android/server/accessibility/AccessibilityManagerService.java
++++ b/services/accessibility/java/com/android/server/accessibility/AccessibilityManagerService.java
+@@ -988,17 +988,19 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+         }
+     }
+ 
+     private void onSomePackagesChangedLocked(
+             @Nullable List<AccessibilityServiceInfo> parsedAccessibilityServiceInfos,
+-            @Nullable List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos) {
++            @Nullable List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos,
++            @Nullable Set<ComponentName> validTileServices) {
+         final AccessibilityUserState userState = getCurrentUserStateLocked();
+         // Reload the installed services since some services may have different attributes
+         // or resolve info (does not support equals), etc. Remove them then to force reload.
+         userState.mInstalledServices.clear();
+         if (readConfigurationForUserStateLocked(userState,
+-                    parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos)) {
++                    parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos,
++                    validTileServices)) {
+             onUserStateChangedLocked(userState);
+         }
+     }
+ 
+     private void onPackageRemovedLocked(String packageName) {
+@@ -2266,10 +2268,13 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+         }
+ 
+         // parse outside of a lock, but after verifying userId
+         parsedAccessibilityServiceInfos = parseAccessibilityServiceInfos(userId);
+         parsedAccessibilityShortcutInfos = parseAccessibilityShortcutInfos(userId);
++        Set<ComponentName> validTileServices = AccessibilityTileUtils.getValidA11yTileServices(
++                mContext, LocalServices.getService(PackageManagerInternal.class),
++                parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos, userId);
+ 
+         synchronized (mLock) {
+             // Disconnect from services for the old user.
+             AccessibilityUserState oldUserState = getCurrentUserStateLocked();
+             oldUserState.onSwitchToAnotherUserLocked();
+@@ -2284,11 +2289,12 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+             // The user changed.
+             mCurrentUserId = userId;
+             AccessibilityUserState userState = getCurrentUserStateLocked();
+ 
+             readConfigurationForUserStateLocked(userState,
+-                    parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos);
++                    parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos,
++                    validTileServices);
+             mSecurityPolicy.onSwitchUserLocked(mCurrentUserId, userState.mEnabledServices);
+             // Even if reading did not yield change, we have to update
+             // the state since the context in which the current user
+             // state was used has changed since it was inactive.
+             onUserStateChangedLocked(userState);
+@@ -2697,27 +2703,29 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+         }
+         return result;
+     }
+ 
+     private boolean readInstalledAccessibilityServiceLocked(AccessibilityUserState userState,
+-            @Nullable List<AccessibilityServiceInfo> parsedAccessibilityServiceInfos) {
++            @Nullable List<AccessibilityServiceInfo> parsedAccessibilityServiceInfos,
++            @Nullable Set<ComponentName> validTileServices) {
+         for (int i = 0, count = parsedAccessibilityServiceInfos.size(); i < count; i++) {
+             AccessibilityServiceInfo accessibilityServiceInfo =
+                     parsedAccessibilityServiceInfos.get(i);
+             if (userState.mCrashedServices.contains(accessibilityServiceInfo.getComponentName())) {
+                 // Restore the crashed attribute.
+                 accessibilityServiceInfo.crashed = true;
+             }
+         }
+ 
++        boolean changed = false;
+         if (!parsedAccessibilityServiceInfos.equals(userState.mInstalledServices)) {
+             userState.mInstalledServices.clear();
+             userState.mInstalledServices.addAll(parsedAccessibilityServiceInfos);
+-            userState.updateTileServiceMapForAccessibilityServiceLocked();
+-            return true;
++            changed = true;
+         }
+-        return false;
++        userState.updateTileServiceMapForAccessibilityServiceLocked(validTileServices);
++        return changed;
+     }
+ 
+     /**
+      * Returns the {@link AccessibilityShortcutInfo}s of the installed
+      * accessibility shortcut targets for the given user.
+@@ -2732,11 +2740,13 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+         return AccessibilityManager.getInstance(mContext)
+                 .getInstalledAccessibilityShortcutListAsUser(mContext, userId);
+     }
+ 
+     private boolean readInstalledAccessibilityShortcutLocked(AccessibilityUserState userState,
+-            List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos) {
++            List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos,
++            @Nullable Set<ComponentName> validTileServices) {
++        boolean changed = false;
+         if (!parsedAccessibilityShortcutInfos.equals(userState.mInstalledShortcuts)) {
+             List<String> componentNames = userState.mInstalledShortcuts.stream()
+                     .filter(a11yActivity ->
+                             !parsedAccessibilityShortcutInfos.contains(a11yActivity))
+                     .map(a11yActivity -> a11yActivity.getComponentName().flattenToString())
+@@ -2747,14 +2757,14 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+                         componentNames, userState.mUserId);
+             }
+ 
+             userState.mInstalledShortcuts.clear();
+             userState.mInstalledShortcuts.addAll(parsedAccessibilityShortcutInfos);
+-            userState.updateTileServiceMapForAccessibilityActivityLocked();
+-            return true;
++            changed = true;
+         }
+-        return false;
++        userState.updateTileServiceMapForAccessibilityActivityLocked(validTileServices);
++        return changed;
+     }
+ 
+     private boolean readEnabledAccessibilityServicesLocked(AccessibilityUserState userState) {
+         mTempComponentNameSet.clear();
+         readComponentNamesFromSettingLocked(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+@@ -3575,15 +3585,16 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+     }
+ 
+     private boolean readConfigurationForUserStateLocked(
+             AccessibilityUserState userState,
+             List<AccessibilityServiceInfo> parsedAccessibilityServiceInfos,
+-            List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos) {
++            List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos,
++            @Nullable Set<ComponentName> validTileServices) {
+         boolean somethingChanged = readInstalledAccessibilityServiceLocked(
+-                userState, parsedAccessibilityServiceInfos);
++                userState, parsedAccessibilityServiceInfos, validTileServices);
+         somethingChanged |= readInstalledAccessibilityShortcutLocked(
+-                userState, parsedAccessibilityShortcutInfos);
++                userState, parsedAccessibilityShortcutInfos, validTileServices);
+         somethingChanged |= readEnabledAccessibilityServicesLocked(userState);
+         somethingChanged |= readTouchExplorationGrantedAccessibilityServicesLocked(userState);
+         somethingChanged |= readTouchExplorationEnabledSettingLocked(userState);
+         somethingChanged |= readHighTextContrastEnabledSettingLocked(userState);
+         somethingChanged |= readAudioDescriptionEnabledSettingLocked(userState);
+@@ -6844,10 +6855,14 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+             final int userId = getChangingUserId();
+             List<AccessibilityServiceInfo> parsedAccessibilityServiceInfos = mManagerService
+                     .parseAccessibilityServiceInfos(userId);
+             List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos = mManagerService
+                     .parseAccessibilityShortcutInfos(userId);
++            Set<ComponentName> validTileServices = AccessibilityTileUtils.getValidA11yTileServices(
++                    mManagerService.mContext,
++                    LocalServices.getService(PackageManagerInternal.class),
++                    parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos, userId);
+             synchronized (mManagerService.getLock()) {
+                 // Only the profile parent can install accessibility services.
+                 // Therefore we ignore packages from linked profiles.
+                 if (userId != mManagerService.getCurrentUserIdLocked()) {
+                     return;
+@@ -6859,11 +6874,11 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+                     Slog.w(LOG_TAG,
+                             "onSomePackagesChanged: service not initialized, skip the callback.");
+                     return;
+                 }
+                 mManagerService.onSomePackagesChangedLocked(parsedAccessibilityServiceInfos,
+-                        parsedAccessibilityShortcutInfos);
++                        parsedAccessibilityShortcutInfos, validTileServices);
+             }
+         }
+ 
+         @Override
+         public void onPackageUpdateFinished(String packageName, int uid) {
+@@ -6881,10 +6896,14 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+             final int userId = getChangingUserId();
+             List<AccessibilityServiceInfo> parsedAccessibilityServiceInfos = mManagerService
+                     .parseAccessibilityServiceInfos(userId);
+             List<AccessibilityShortcutInfo> parsedAccessibilityShortcutInfos =
+                     mManagerService.parseAccessibilityShortcutInfos(userId);
++            Set<ComponentName> validTileServices = AccessibilityTileUtils.getValidA11yTileServices(
++                    mManagerService.mContext,
++                    LocalServices.getService(PackageManagerInternal.class),
++                    parsedAccessibilityServiceInfos, parsedAccessibilityShortcutInfos, userId);
+             synchronized (mManagerService.getLock()) {
+                 if (userId != mManagerService.getCurrentUserIdLocked()) {
+                     return;
+                 }
+                 final AccessibilityUserState userState = mManagerService.getUserStateLocked(userId);
+@@ -6897,11 +6916,11 @@ public class AccessibilityManagerService extends IAccessibilityManager.Stub
+                 // get a new one.
+                 userState.mInstalledServices.clear();
+                 final boolean configurationChanged;
+                 configurationChanged = mManagerService.readConfigurationForUserStateLocked(
+                         userState, parsedAccessibilityServiceInfos,
+-                        parsedAccessibilityShortcutInfos);
++                        parsedAccessibilityShortcutInfos, validTileServices);
+                 if (reboundAService || configurationChanged) {
+                     mManagerService.onUserStateChangedLocked(userState);
+                 }
+                 // Passing 0 for restoreFromSdkInt to have this migration check execute each
+                 // time. It can make sure a11y button settings are correctly if there's an a11y
+diff --git a/services/accessibility/java/com/android/server/accessibility/AccessibilityUserState.java b/services/accessibility/java/com/android/server/accessibility/AccessibilityUserState.java
+index 178fefbd23c3..f73c94fd710f 100644
+--- a/services/accessibility/java/com/android/server/accessibility/AccessibilityUserState.java
++++ b/services/accessibility/java/com/android/server/accessibility/AccessibilityUserState.java
+@@ -1173,11 +1173,12 @@ public class AccessibilityUserState {
+             return mServiceDetectsGestures.get(displayId);
+         }
+         return false;
+     }
+ 
+-    public void updateTileServiceMapForAccessibilityServiceLocked() {
++    public void updateTileServiceMapForAccessibilityServiceLocked(
++            @Nullable Set<ComponentName> validTileServices) {
+         mA11yServiceToTileService.clear();
+         mInstalledServices.forEach(
+                 a11yServiceInfo -> {
+                     String tileServiceName = a11yServiceInfo.getTileServiceName();
+                     if (!TextUtils.isEmpty(tileServiceName)) {
+@@ -1188,27 +1189,34 @@ public class AccessibilityUserState {
+                         );
+                         ComponentName tileService = new ComponentName(
+                                 a11yFeature.getPackageName(),
+                                 tileServiceName
+                         );
+-                        mA11yServiceToTileService.put(a11yFeature, tileService);
++                        // Only add tile service if it's in the validated set
++                        if (validTileServices == null || validTileServices.contains(tileService)) {
++                            mA11yServiceToTileService.put(a11yFeature, tileService);
++                        }
+                     }
+                 }
+         );
+     }
+ 
+-    public void updateTileServiceMapForAccessibilityActivityLocked() {
++    public void updateTileServiceMapForAccessibilityActivityLocked(
++            @Nullable Set<ComponentName> validTileServices) {
+         mA11yActivityToTileService.clear();
+         mInstalledShortcuts.forEach(
+                 a11yShortcutInfo -> {
+                     String tileServiceName = a11yShortcutInfo.getTileServiceName();
+                     if (!TextUtils.isEmpty(tileServiceName)) {
+                         ComponentName a11yFeature = a11yShortcutInfo.getComponentName();
+                         ComponentName tileService = new ComponentName(
+                                 a11yFeature.getPackageName(),
+                                 tileServiceName);
+-                        mA11yActivityToTileService.put(a11yFeature, tileService);
++                        // Only add tile service if it's in the validated set
++                        if (validTileServices == null || validTileServices.contains(tileService)) {
++                            mA11yActivityToTileService.put(a11yFeature, tileService);
++                        }
+                     }
+                 }
+         );
+     }
+ 

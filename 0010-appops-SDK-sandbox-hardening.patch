@@ -1,0 +1,33 @@
+diff --git a/services/core/java/com/android/server/appop/AppOpsService.java b/services/core/java/com/android/server/appop/AppOpsService.java
+index 9dca59b6ceec..8cd2c294c619 100644
+--- a/services/core/java/com/android/server/appop/AppOpsService.java
++++ b/services/core/java/com/android/server/appop/AppOpsService.java
+@@ -5039,14 +5039,28 @@ public class AppOpsService extends IAppOpsService.Stub {
+ 
+     private boolean isPackageNullOrSystem(String packageName, int uid) {
+         if (packageName == null) {
+             return true;
+         }
++        // Block SDK sandbox UIDs from being treated as system packages
++        if (Process.isSdkSandboxUid(uid)) {
++            return false;
++        }
+         int appId = UserHandle.getAppId(uid);
+         if (appId > 0 && appId < Process.FIRST_APPLICATION_UID) {
+             return true;
+         }
++        // Verify the UID actually matches the package before checking system status
++        try {
++            int pkgUid = mPackageManagerInternal.getPackageUid(packageName,
++                    0, UserHandle.getUserId(uid));
++            if (pkgUid != uid) {
++                return false;
++            }
++        } catch (Exception e) {
++            return false;
++        }
+         return mPackageManagerInternal.isSystemPackage(packageName);
+     }
+ 
+     private boolean isAttributionInPackage(@Nullable AndroidPackage pkg,
+             @Nullable String attributionTag) {

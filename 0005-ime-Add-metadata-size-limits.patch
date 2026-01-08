@@ -1,0 +1,136 @@
+diff --git a/core/java/android/view/inputmethod/InputMethodInfo.java b/core/java/android/view/inputmethod/InputMethodInfo.java
+index c9485d7d3b0f..fd4248328bb3 100644
+--- a/core/java/android/view/inputmethod/InputMethodInfo.java
++++ b/core/java/android/view/inputmethod/InputMethodInfo.java
+@@ -466,10 +466,15 @@ public final class InputMethodInfo implements Parcelable {
+         if (resourceId == 0) {
+             // No metadata, skip validation.
+             return;
+         }
+ 
++        // Validate name length to prevent DoS
++        if (si.name != null && si.name.length() > 1000) {
++            throw new XmlPullParserException("Input method name exceeds 1000 characters");
++        }
++
+         // Validate file size using InputStream.skip()
+         long totalBytesSkipped = 0;
+         // Loop to ensure we skip the required number of bytes, as a single
+         // call to skip() is not guaranteed to skip the full amount.
+         try (InputStream is = res.openRawResource(resourceId)) {
+@@ -1126,6 +1131,115 @@ public final class InputMethodInfo implements Parcelable {
+ 
+     @Override
+     public int describeContents() {
+         return 0;
+     }
++
++    /**
++     * Wrapper around TypedArray that tracks bytes read and enforces limits.
++     * @hide
++     */
++    public static final class TypedArrayWrapper implements AutoCloseable {
++        private final TypedArray mTypedArray;
++        private final MetadataReadBytesTracker mReadTracker;
++        private final boolean mIsReadingSubtype;
++
++        /** Create wrapper for method-level attributes. */
++        public static TypedArrayWrapper createForMethod(TypedArray wrapped,
++                MetadataReadBytesTracker readTracker) {
++            return new TypedArrayWrapper(wrapped, readTracker, false);
++        }
++
++        /** Create wrapper for subtype-level attributes. */
++        public static TypedArrayWrapper createForSubtype(TypedArray wrapped,
++                MetadataReadBytesTracker readTracker) {
++            return new TypedArrayWrapper(wrapped, readTracker, true);
++        }
++
++        private TypedArrayWrapper(TypedArray wrapped, MetadataReadBytesTracker readTracker,
++                boolean isReadingSubtype) {
++            mTypedArray = wrapped;
++            mReadTracker = readTracker;
++            mIsReadingSubtype = isReadingSubtype;
++        }
++
++        /** Get int value, tracking bytes read. */
++        public int getInt(int index, int defaultValue) throws XmlPullParserException {
++            if (!mTypedArray.hasValue(index)) {
++                return defaultValue;
++            }
++            int ret = mTypedArray.getInt(index, defaultValue);
++            mReadTracker.onReadBytes(4);
++            return ret;
++        }
++
++        /** Get string value, enforcing length limits. */
++        public String getString(int index) throws XmlPullParserException {
++            String ret = mTypedArray.getString(index);
++            int maxLen = getMaxLength(index);
++            if (ret != null && ret.length() > maxLen) {
++                throw new XmlPullParserException(
++                        "String resources in input method exceed the length limit of "
++                                + maxLen + " characters");
++            }
++            mReadTracker.onReadBytes(ret == null ? 0 : ret.length() * 2);
++            return ret;
++        }
++
++        /** Get boolean value, tracking bytes read. */
++        public boolean getBoolean(int index, boolean defaultValue) throws XmlPullParserException {
++            if (!mTypedArray.hasValue(index)) {
++                return defaultValue;
++            }
++            boolean ret = mTypedArray.getBoolean(index, defaultValue);
++            mReadTracker.onReadBytes(1);
++            return ret;
++        }
++
++        /** Get resource ID, tracking bytes read. */
++        public int getResourceId(int index, int defaultValue) throws XmlPullParserException {
++            if (!mTypedArray.hasValue(index)) {
++                return defaultValue;
++            }
++            int ret = mTypedArray.getResourceId(index, defaultValue);
++            mReadTracker.onReadBytes(4);
++            return ret;
++        }
++
++        @Override
++        public void close() {
++            mTypedArray.recycle();
++        }
++
++        private int getMaxLength(int index) {
++            if (mIsReadingSubtype) {
++                return Integer.MAX_VALUE;
++            }
++            // Indices 2 and 13 correspond to settingsActivity and stylus handwriting settings
++            switch (index) {
++                case 2:
++                case 13:
++                    return 1000;
++                default:
++                    return Integer.MAX_VALUE;
++            }
++        }
++    }
++
++    /**
++     * Tracks total bytes read from metadata and enforces limits.
++     * @hide
++     */
++    public static final class MetadataReadBytesTracker {
++        private int mRemainingBytes = MAX_METADATA_SIZE_BYTES;
++
++        /** Called when bytes are read; throws if limit exceeded. */
++        public void onReadBytes(int bytes) throws XmlPullParserException {
++            mRemainingBytes -= bytes;
++            if (mRemainingBytes < 0) {
++                throw new XmlPullParserException(
++                        "The input method service has metadata exceeds the "
++                                + MAX_METADATA_SIZE_BYTES + " byte limit");
++            }
++        }
++    }
+ }

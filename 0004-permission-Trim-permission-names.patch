@@ -1,0 +1,31 @@
+diff --git a/core/java/com/android/internal/pm/pkg/component/ParsedPermissionUtils.java b/core/java/com/android/internal/pm/pkg/component/ParsedPermissionUtils.java
+index 64cf311c7426..1f5ed1746757 100644
+--- a/core/java/com/android/internal/pm/pkg/component/ParsedPermissionUtils.java
++++ b/core/java/com/android/internal/pm/pkg/component/ParsedPermissionUtils.java
+@@ -170,10 +170,12 @@ public class ParsedPermissionUtils {
+                             + " restricted: " + permission.getName());
+                 }
+             }
+         }
+ 
++        permission.setName(permission.getName().trim());
++
+         permission.setProtectionLevel(
+                 PermissionInfo.fixProtectionLevel(permission.getProtectionLevel()));
+ 
+         final int otherProtectionFlags = getProtectionFlags(permission)
+                 & ~(PermissionInfo.PROTECTION_FLAG_APPOP | PermissionInfo.PROTECTION_FLAG_INSTANT
+@@ -283,11 +285,12 @@ public class ParsedPermissionUtils {
+             permissionGroup.setRequestDetailRes(sa.getResourceId(R.styleable.AndroidManifestPermissionGroup_requestDetail, 0))
+                     .setBackgroundRequestRes(sa.getResourceId(R.styleable.AndroidManifestPermissionGroup_backgroundRequest, 0))
+                     .setBackgroundRequestDetailRes(sa.getResourceId(R.styleable.AndroidManifestPermissionGroup_backgroundRequestDetail, 0))
+                     .setRequestRes(sa.getResourceId(R.styleable.AndroidManifestPermissionGroup_request, 0))
+                     .setPriority(sa.getInt(R.styleable.AndroidManifestPermissionGroup_priority, 0))
+-                    .setFlags(sa.getInt(R.styleable.AndroidManifestPermissionGroup_permissionGroupFlags,0));
++                    .setFlags(sa.getInt(R.styleable.AndroidManifestPermissionGroup_permissionGroupFlags,0))
++                    .setName(permissionGroup.getName().trim());
+             // @formatter:on
+         } finally {
+             sa.recycle();
+         }
+ 

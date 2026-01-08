@@ -1,0 +1,49 @@
+diff --git a/src/com/android/providers/media/MediaProvider.java b/src/com/android/providers/media/MediaProvider.java
+index 3dfac9b3e..78b3ebcf4 100644
+--- a/src/com/android/providers/media/MediaProvider.java
++++ b/src/com/android/providers/media/MediaProvider.java
+@@ -10820,11 +10820,11 @@ public class MediaProvider extends ContentProvider {
+             requireOwnershipForItem(ownerPackageName, uri);
+         }
+ 
+         // Figure out if we need to redact contents
+         final boolean redactionNeeded = isRedactionNeededForOpenViaContentResolver(redactedUri,
+-                ownerPackageName, file);
++                ownerPackageName, file, opts);
+         long[] redactionRanges;
+         try {
+             redactionRanges = redactionNeeded ? RedactionUtils.getRedactionRanges(file)
+                     : new long[0];
+         } catch (IOException e) {
+@@ -10939,16 +10939,30 @@ public class MediaProvider extends ContentProvider {
+             }
+         }
+     }
+ 
+     private boolean isRedactionNeededForOpenViaContentResolver(Uri redactedUri,
+-            String ownerPackageName, File file) {
++            String ownerPackageName, File file, Bundle opts) {
+         // Redacted Uris should always redact information
+         if (redactedUri != null) {
+             return true;
+         }
+ 
++        // Check if the MEDIA_CAPABILITIES_UID specified in the bundle requires redaction.
++        // This validates that the caller's delegated UID also needs location redaction.
++        if (opts != null) {
++            final int mediaCapabilitiesUid = opts.getInt(
++                    MediaStore.EXTRA_MEDIA_CAPABILITIES_UID, 0);
++            if (mediaCapabilitiesUid > 0) {
++                LocalCallingIdentity externalIdentity = LocalCallingIdentity.fromExternal(
++                        getContext(), mUserCache, mediaCapabilitiesUid);
++                if (externalIdentity.hasPermission(PERMISSION_IS_REDACTION_NEEDED)) {
++                    return true;
++                }
++            }
++        }
++
+         final boolean callerIsOwner = Objects.equals(getCallingPackageOrSelf(), ownerPackageName);
+         if (callerIsOwner) {
+             return false;
+         }
+ 

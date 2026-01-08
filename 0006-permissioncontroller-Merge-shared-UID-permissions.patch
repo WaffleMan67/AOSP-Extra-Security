@@ -1,0 +1,130 @@
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/data/LightPackageInfoLiveData.kt b/PermissionController/src/com/android/permissioncontroller/permission/data/LightPackageInfoLiveData.kt
+index ac3f670ec3..6e1b00dc1d 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/data/LightPackageInfoLiveData.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/data/LightPackageInfoLiveData.kt
+@@ -270,7 +270,91 @@ private constructor(
+                 key.first,
+                 key.second,
+                 deviceId
+             )
+         }
++
++        /**
++         * Merge permissions from all packages sharing a UID into the given PackageInfo.
++         *
++         * When multiple packages share a UID, permissions granted to any of them effectively
++         * apply to all. This method ensures we consider all packages' permissions.
++         */
++        @JvmStatic
++        fun mergePermissionsInSharedUid(
++            packageInfo: PackageInfo,
++            flags: Int,
++            packageManager: PackageManager
++        ): PackageInfo {
++            if (packageInfo.sharedUserId == null || packageInfo.applicationInfo == null) {
++                return packageInfo
++            }
++
++            val uid = packageInfo.applicationInfo!!.uid
++            val packagesForUid = packageManager.getPackagesForUid(uid) ?: return packageInfo
++
++            val sharedPackages = packagesForUid.mapNotNull { pkgName ->
++                try {
++                    packageManager.getPackageInfo(pkgName, flags)
++                } catch (e: PackageManager.NameNotFoundException) {
++                    null
++                }
++            }
++
++            return mergePermissionsInSharedUid(packageInfo, sharedPackages)
++        }
++
++        /**
++         * Merge permissions from a list of packages sharing a UID into the given PackageInfo.
++         */
++        @JvmStatic
++        fun mergePermissionsInSharedUid(
++            packageInfo: PackageInfo,
++            sharedPackages: List<PackageInfo>?
++        ): PackageInfo {
++            if (sharedPackages == null ||
++                packageInfo.applicationInfo == null ||
++                packageInfo.sharedUserId == null) {
++                return packageInfo
++            }
++
++            val packages = if (packageInfo !in sharedPackages) {
++                sharedPackages + packageInfo
++            } else {
++                sharedPackages
++            }
++
++            val uid = packageInfo.applicationInfo!!.uid
++            val mergedPermissions = mutableMapOf<String, Int>()
++
++            for (pkg in packages) {
++                if (pkg.applicationInfo?.uid != uid) continue
++                val permissions = pkg.requestedPermissions ?: continue
++                val permFlags = pkg.requestedPermissionsFlags ?: continue
++
++                for ((index, permission) in permissions.withIndex()) {
++                    val currentFlags = mergedPermissions.getOrDefault(permission, 0)
++                    mergedPermissions[permission] = currentFlags or permFlags[index]
++                }
++            }
++
++            val permArray = mergedPermissions.keys.toTypedArray()
++            val flagsArray = permArray.map { mergedPermissions[it]!! }.toIntArray()
++
++            return copyPackageInfo(packageInfo).apply {
++                requestedPermissions = permArray
++                requestedPermissionsFlags = flagsArray
++            }
++        }
++
++        private fun copyPackageInfo(packageInfo: PackageInfo): PackageInfo {
++            val parcel = android.os.Parcel.obtain()
++            try {
++                packageInfo.writeToParcel(parcel, 0)
++                parcel.setDataPosition(0)
++                return PackageInfo.CREATOR.createFromParcel(parcel)
++            } finally {
++                parcel.recycle()
++            }
++        }
+     }
+ }
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java b/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java
+index bc1bf6090e..df271bd271 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java
++++ b/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java
+@@ -56,10 +56,11 @@ import androidx.annotation.Nullable;
+ import androidx.annotation.StringRes;
+ 
+ import com.android.modules.utils.build.SdkLevel;
+ import com.android.permissioncontroller.PermissionControllerApplication;
+ import com.android.permissioncontroller.R;
++import com.android.permissioncontroller.permission.data.LightPackageInfoLiveData;
+ import com.android.permissioncontroller.permission.service.LocationAccessCheck;
+ import com.android.permissioncontroller.permission.utils.ArrayUtils;
+ import com.android.permissioncontroller.permission.utils.ContextCompat;
+ import com.android.permissioncontroller.permission.utils.KotlinUtils;
+ import com.android.permissioncontroller.permission.utils.LocationUtils;
+@@ -224,12 +225,15 @@ public final class AppPermissionGroup implements Comparable<AppPermissionGroup>
+      * @return the AppPermissionGroup.
+      */
+     public static AppPermissionGroup create(Application app, String packageName,
+             String permissionGroupName, UserHandle user, boolean delayChanges) {
+         try {
+-            PackageInfo packageInfo = Utils.getUserContext(app, user).getPackageManager()
+-                    .getPackageInfo(packageName, PackageManager.GET_PERMISSIONS);
++            PackageManager pm = Utils.getUserContext(app, user).getPackageManager();
++            PackageInfo packageInfo = LightPackageInfoLiveData.mergePermissionsInSharedUid(
++                    pm.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS),
++                    PackageManager.GET_PERMISSIONS,
++                    pm);
+             PackageItemInfo groupInfo = Utils.getGroupInfo(permissionGroupName, app);
+             if (groupInfo == null) {
+                 return null;
+             }
+ 
